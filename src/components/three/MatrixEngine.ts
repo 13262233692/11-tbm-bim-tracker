@@ -1,110 +1,167 @@
 import * as THREE from 'three';
 import type { TbmPoseData, TransformHierarchy } from '@/types/tbm';
-import { buildTransformHierarchy, interpolateMatrices, DEG2RAD } from '@/utils/matrixUtils';
+import {
+  buildTransformHierarchy,
+  interpolateMatrices,
+  DEG2RAD,
+  slerpQuaternions,
+  buildQuaternionPoseState,
+  interpolatePoseWithQuaternion,
+  composeMatrixFromTRS,
+} from '@/utils/matrixUtils';
+
+interface PoseState {
+  position: THREE.Vector3;
+  bodyQuaternion: THREE.Quaternion;
+}
 
 export class MatrixEngine {
   private currentTransforms: TransformHierarchy | null = null;
-  private targetTransforms: TransformHierarchy | null = null;
+  private currentPose: PoseState | null = null;
+  private targetPose: PoseState | null = null;
+
   private interpolationProgress: number = 1;
   private interpolationDuration: number = 100;
   private lastUpdateTime: number = 0;
+
   private cutterHeadAccumulatedRotation: number = 0;
   private lastCutterSpeed: number = 0;
+  private lastRingCount: number = 0;
+
+  private pendingPoseData: TbmPoseData | null = null;
 
   constructor(interpolationDuration: number = 100) {
     this.interpolationDuration = interpolationDuration;
   }
 
   updateTargetPose(pose: TbmPoseData): void {
-    if (this.currentTransforms) {
-      this.targetTransforms = buildTransformHierarchy(pose);
+    this.pendingPoseData = pose;
+    this.lastCutterSpeed = pose.cutterHead.speed;
+    this.lastRingCount = pose.ringCount;
+
+    const newTargetPose = buildQuaternionPoseState(pose);
+
+    if (!this.currentPose) {
+      this.currentPose = {
+        position: newTargetPose.position.clone(),
+        bodyQuaternion: newTargetPose.bodyQuaternion.clone(),
+      };
+      this.targetPose = {
+        position: newTargetPose.position.clone(),
+        bodyQuaternion: newTargetPose.bodyQuaternion.clone(),
+      };
+      this.currentTransforms = buildTransformHierarchy(
+        pose,
+        this.currentPose.bodyQuaternion
+      );
+      this.interpolationProgress = 1;
+    } else {
+      const dot = this.currentPose.bodyQuaternion.dot(newTargetPose.bodyQuaternion);
+      if (dot < 0) {
+        newTargetPose.bodyQuaternion.x = -newTargetPose.bodyQuaternion.x;
+        newTargetPose.bodyQuaternion.y = -newTargetPose.bodyQuaternion.y;
+        newTargetPose.bodyQuaternion.z = -newTargetPose.bodyQuaternion.z;
+        newTargetPose.bodyQuaternion.w = -newTargetPose.bodyQuaternion.w;
+      }
+      this.targetPose = {
+        position: newTargetPose.position.clone(),
+        bodyQuaternion: newTargetPose.bodyQuaternion.clone(),
+      };
       this.interpolationProgress = 0;
       this.lastUpdateTime = performance.now();
-    } else {
-      this.currentTransforms = buildTransformHierarchy(pose);
-      this.targetTransforms = this.currentTransforms;
-      this.interpolationProgress = 1;
     }
-    this.lastCutterSpeed = pose.cutterHead.speed;
   }
 
   update(deltaTime: number): void {
-    if (!this.currentTransforms || !this.targetTransforms) return;
+    if (!this.currentPose || !this.targetPose) return;
+
+    const currentTime = performance.now();
 
     if (this.interpolationProgress < 1) {
-      const elapsed = performance.now() - this.lastUpdateTime;
+      const elapsed = currentTime - this.lastUpdateTime;
       this.interpolationProgress = Math.min(1, elapsed / this.interpolationDuration);
 
       const t = this.easeInOutCubic(this.interpolationProgress);
 
-      this.currentTransforms = {
-        root: interpolateMatrices(
-          this.targetTransforms.root,
-          this.targetTransforms.root,
-          1
-        ),
-        body: interpolateMatrices(
-          this.currentTransforms.body,
-          this.targetTransforms.body,
-          t
-        ),
-        cutterHead: this.interpolateCutterHead(t),
-        screwConveyor: interpolateMatrices(
-          this.currentTransforms.screwConveyor,
-          this.targetTransforms.screwConveyor,
-          t
-        ),
-        erector: interpolateMatrices(
-          this.currentTransforms.erector,
-          this.targetTransforms.erector,
-          t
-        ),
-      };
+      const interpolated = interpolatePoseWithQuaternion(
+        this.currentPose.position,
+        this.currentPose.bodyQuaternion,
+        this.targetPose.position,
+        this.targetPose.bodyQuaternion,
+        t
+      );
+
+      this.currentPose.position.copy(interpolated.position);
+      this.currentPose.bodyQuaternion.copy(interpolated.quaternion);
     }
 
     this.cutterHeadAccumulatedRotation +=
       (this.lastCutterSpeed * DEG2RAD * deltaTime) / 60;
+    while (this.cutterHeadAccumulatedRotation > Math.PI * 2) {
+      this.cutterHeadAccumulatedRotation -= Math.PI * 2;
+    }
+    while (this.cutterHeadAccumulatedRotation < 0) {
+      this.cutterHeadAccumulatedRotation += Math.PI * 2;
+    }
 
-    if (this.currentTransforms) {
-      const rotationMatrix = new THREE.Matrix4().makeRotationZ(
-        this.cutterHeadAccumulatedRotation
-      );
-      const offsetMatrix = new THREE.Matrix4().makeTranslation(0, 0, 0.5);
-      const cutterLocal = offsetMatrix.clone().multiply(rotationMatrix);
-
-      const bodyWorld = this.currentTransforms.body.clone();
-      this.currentTransforms.cutterHead = bodyWorld.multiply(cutterLocal);
+    if (this.currentPose) {
+      this.rebuildTransforms();
     }
   }
 
-  private interpolateCutterHead(t: number): THREE.Matrix4 {
-    if (!this.currentTransforms || !this.targetTransforms) {
-      return new THREE.Matrix4();
-    }
+  private rebuildTransforms(): void {
+    if (!this.currentPose || !this.pendingPoseData) return;
 
-    const posA = new THREE.Vector3();
-    const quatA = new THREE.Quaternion();
-    const scaleA = new THREE.Vector3();
-    this.currentTransforms.cutterHead.decompose(posA, quatA, scaleA);
+    const { position, bodyQuaternion } = this.currentPose;
+    const pose = this.pendingPoseData;
 
-    const posB = new THREE.Vector3();
-    const quatB = new THREE.Quaternion();
-    const scaleB = new THREE.Vector3();
-    this.targetTransforms.cutterHead.decompose(posB, quatB, scaleB);
-
-    const pos = posA.clone().lerp(posB, t);
-    const quat = quatA.clone().slerp(quatB, t);
-    const scale = scaleA.clone().lerp(scaleB, t);
-
-    const rotationMatrix = new THREE.Matrix4().makeRotationZ(
-      this.cutterHeadAccumulatedRotation
+    const rootMatrix = new THREE.Matrix4().makeTranslation(
+      position.x,
+      position.y,
+      position.z
     );
 
-    const result = new THREE.Matrix4();
-    result.compose(pos, quat, scale);
-    result.multiply(rotationMatrix);
+    const bodyRotationMatrix = new THREE.Matrix4().makeRotationFromQuaternion(
+      bodyQuaternion.clone().normalize()
+    );
+    const bodyWorld = rootMatrix.clone().multiply(bodyRotationMatrix);
 
-    return result;
+    const cutterHeadLocal = this.buildCutterHeadLocalMatrix();
+    const cutterHeadWorld = bodyWorld.clone().multiply(cutterHeadLocal);
+
+    const screwConveyorLocal = new THREE.Matrix4().makeTranslation(-1.5, -1, -3);
+    const screwConveyorWorld = bodyWorld.clone().multiply(screwConveyorLocal);
+
+    const erectorLocal = this.buildErectorLocalMatrix();
+    const erectorWorld = bodyWorld.clone().multiply(erectorLocal);
+
+    this.currentTransforms = {
+      root: rootMatrix,
+      body: bodyWorld,
+      cutterHead: cutterHeadWorld,
+      screwConveyor: screwConveyorWorld,
+      erector: erectorWorld,
+    };
+  }
+
+  private buildCutterHeadLocalMatrix(): THREE.Matrix4 {
+    const rotation = new THREE.Matrix4().makeRotationZ(
+      this.cutterHeadAccumulatedRotation
+    );
+    const offset = new THREE.Matrix4().makeTranslation(
+      0,
+      0,
+      this.lastCutterSpeed > 0 ? 0.5 : 0
+    );
+    return offset.clone().multiply(rotation);
+  }
+
+  private buildErectorLocalMatrix(): THREE.Matrix4 {
+    const rotation = new THREE.Matrix4().makeRotationZ(
+      (this.lastRingCount % 6) * 60 * DEG2RAD
+    );
+    const offset = new THREE.Matrix4().makeTranslation(0, 0, -6);
+    return offset.clone().multiply(rotation);
   }
 
   private easeInOutCubic(t: number): number {
@@ -116,21 +173,13 @@ export class MatrixEngine {
   }
 
   getBodyPosition(): THREE.Vector3 | null {
-    if (!this.currentTransforms) return null;
-    const position = new THREE.Vector3();
-    position.setFromMatrixPosition(this.currentTransforms.body);
-    return position;
+    return this.currentPose ? this.currentPose.position.clone() : null;
   }
 
   getBodyQuaternion(): THREE.Quaternion | null {
-    if (!this.currentTransforms) return null;
-    const quaternion = new THREE.Quaternion();
-    this.currentTransforms.body.decompose(
-      new THREE.Vector3(),
-      quaternion,
-      new THREE.Vector3()
-    );
-    return quaternion;
+    return this.currentPose
+      ? this.currentPose.bodyQuaternion.clone().normalize()
+      : null;
   }
 
   getCutterHeadRotation(): number {
@@ -149,7 +198,7 @@ export class MatrixEngine {
     matrix.decompose(position, quaternion, scale);
 
     object.position.copy(position);
-    object.quaternion.copy(quaternion);
+    object.quaternion.copy(quaternion.normalize());
     object.scale.copy(scale);
     object.matrixAutoUpdate = false;
     object.matrix.copy(matrix);
@@ -158,10 +207,13 @@ export class MatrixEngine {
 
   reset(): void {
     this.currentTransforms = null;
-    this.targetTransforms = null;
+    this.currentPose = null;
+    this.targetPose = null;
+    this.pendingPoseData = null;
     this.interpolationProgress = 1;
     this.cutterHeadAccumulatedRotation = 0;
     this.lastCutterSpeed = 0;
+    this.lastRingCount = 0;
   }
 
   setInterpolationDuration(duration: number): void {

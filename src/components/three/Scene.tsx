@@ -9,6 +9,7 @@ import { MatrixEngine } from './MatrixEngine';
 import { LODManager } from './LODManager';
 import { useModelStore } from '@/store/modelStore';
 import { usePoseStore, selectSmoothedPose } from '@/store/poseStore';
+import { applyReverseDepthToRenderer, applyLogDepthToMaterial, DEFAULT_REVERSE_DEPTH_CONFIG } from '@/utils/depthBuffer';
 
 interface SceneContentProps {
   matrixEngine: MatrixEngine;
@@ -23,17 +24,70 @@ const SceneContent: React.FC<SceneContentProps> = ({
   followTBM,
   cameraMode,
 }) => {
-  const { camera, scene } = useThree();
+  const { camera, scene, gl } = useThree();
   const controlsRef = useRef<any>(null);
   const smoothedPose = usePoseStore(selectSmoothedPose);
   const tbmConfig = useModelStore((state) => state.tbmConfig);
   const setRenderStats = useModelStore((state) => state.setRenderStats);
   const lastTimeRef = useRef(performance.now());
   const frameCountRef = useRef(0);
+  const depthSetupRef = useRef(false);
 
   useEffect(() => {
-    scene.fog = new THREE.FogExp2(0x0a1628, 0.008);
+    if (depthSetupRef.current) return;
+    depthSetupRef.current = true;
+
+    try {
+      applyReverseDepthToRenderer(
+        gl as unknown as THREE.WebGLRenderer,
+        camera as THREE.PerspectiveCamera,
+        {
+          near: 1.0,
+          far: 50000,
+          fov: 60,
+        }
+      );
+    } catch (e) {
+      console.warn('[Scene] Reverse depth buffer setup failed:', e);
+    }
+
+    const cam = camera as THREE.PerspectiveCamera;
+    cam.near = 1.0;
+    cam.far = 50000;
+    cam.updateProjectionMatrix();
+
+    gl.outputColorSpace = THREE.SRGBColorSpace;
+    gl.toneMapping = THREE.ACESFilmicToneMapping;
+    gl.toneMappingExposure = 1.0;
+
+    const dispose = () => { depthSetupRef.current = false; };
+    return dispose;
+  }, [camera, gl]);
+
+  useEffect(() => {
+    scene.fog = new THREE.FogExp2(0x0a1628, 0.004);
     scene.background = new THREE.Color(0x0a1628);
+  }, [scene]);
+
+  useEffect(() => {
+    const applyLogDepth = (obj: THREE.Object3D) => {
+      if ((obj as THREE.Mesh).isMesh) {
+        const mesh = obj as THREE.Mesh;
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach((m) => {
+          if (m && (m as any).isMaterial && !(m as any)._logDepthApplied) {
+            try {
+              applyLogDepthToMaterial(m);
+              (m as any)._logDepthApplied = true;
+            } catch (e) {
+              // skip
+            }
+          }
+        });
+      }
+    };
+
+    scene.traverse(applyLogDepth);
   }, [scene]);
 
   useFrame((state) => {
@@ -116,11 +170,11 @@ const SceneContent: React.FC<SceneContentProps> = ({
         enableDamping
         dampingFactor={0.05}
         minDistance={5}
-        maxDistance={200}
+        maxDistance={500}
         maxPolarAngle={Math.PI / 2 + 0.3}
       />
 
-      <EffectComposer>
+      <EffectComposer multisampling={0} enableNormalPass={false}>
         <Bloom
           luminanceThreshold={0.2}
           luminanceSmoothing={0.9}
@@ -166,16 +220,41 @@ export const Scene: React.FC<SceneProps> = ({ matrixEngine, lodManager }) => {
     };
   }, [handleFollowTBM, handleCameraMode]);
 
+  const onCreated = useCallback(
+    (state: {
+      gl: THREE.WebGLRenderer;
+      camera: THREE.Camera;
+      scene: THREE.Scene;
+    }) => {
+      const { gl, camera } = state;
+      const cam = camera as THREE.PerspectiveCamera;
+      cam.near = 1.0;
+      cam.far = 50000;
+      cam.updateProjectionMatrix();
+
+      gl.setClearColor(0x0a1628, 1);
+      gl.outputColorSpace = THREE.SRGBColorSpace;
+      gl.toneMapping = THREE.ACESFilmicToneMapping;
+      gl.toneMappingExposure = 1.0;
+    },
+    []
+  );
+
   return (
     <Canvas
       shadows
-      camera={{ position: [0, 10, 20], fov: 60, near: 0.1, far: 2000 }}
+      camera={{ position: [0, 10, 20], fov: 60, near: 1.0, far: 50000 }}
       gl={{
         antialias: true,
         alpha: false,
         powerPreference: 'high-performance',
+        depth: true,
+        logarithmicDepthBuffer: true,
+        stencil: false,
       }}
-      dpr={[1, 2]}
+      dpr={[1, 1.5]}
+      onCreated={onCreated}
+      frameloop="always"
     >
       <SceneContent
         matrixEngine={matrixEngine}

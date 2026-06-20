@@ -313,7 +313,13 @@ export function createSimplifiedSegmentMesh(
     metalness: 0.3,
     roughness: 0.7,
     side: THREE.DoubleSide,
+    polygonOffset: true,
+    polygonOffsetFactor: lodLevel * 0.5 - 1.0,
+    polygonOffsetUnits: -1.0,
   });
 
-  return new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.renderOrder = Math.max(0, 999999 - lodLevel * 1000);
+
+  return mesh;
 }
