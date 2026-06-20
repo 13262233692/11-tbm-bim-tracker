@@ -5,6 +5,7 @@ import { EffectComposer, Bloom, Vignette, ChromaticAberration } from '@react-thr
 import * as THREE from 'three';
 import { TBMModel } from './TBMModel';
 import { TunnelModel } from './TunnelModel';
+import { GeologyProfile } from './GeologyProfile';
 import { MatrixEngine } from './MatrixEngine';
 import { LODManager } from './LODManager';
 import { useModelStore } from '@/store/modelStore';
@@ -163,6 +164,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
 
       <TBMModel matrixEngine={matrixEngine} />
       <TunnelModel lodManager={lodManager} />
+      <GeologyProfile matrixEngine={matrixEngine} />
 
       <OrbitControls
         ref={controlsRef}

@@ -6,11 +6,13 @@ import { StatusBar } from '@/components/ui/StatusBar';
 import { PosePanel } from '@/components/ui/PosePanel';
 import { ProgressPanel } from '@/components/ui/ProgressPanel';
 import { ControlBar } from '@/components/ui/ControlBar';
+import { GeologyToolbar } from '@/components/ui/GeologyToolbar';
 import { usePoseStore } from '@/store/poseStore';
 import { useModelStore } from '@/store/modelStore';
 import { generateMockTunnelRings } from '@/utils/ifcUtils';
 import { createPoseWebSocketMock } from '@/mock/poseSimulator';
 import { useWebSocket } from '@/hooks/useWebSocket';
+import { useGeologyStore } from '@/store/geologyStore';
 import type { TbmPoseData, AlarmRecord } from '@/types/tbm';
 import type { WebSocketStatus } from '@/types/websocket';
 
@@ -27,6 +29,7 @@ export const MonitorPage: React.FC = () => {
   const setTunnelRings = useModelStore((state) => state.setTunnelRings);
   const setIsLoading = useModelStore((state) => state.setIsLoading);
   const setLoadingProgress = useModelStore((state) => state.setLoadingProgress);
+  const generateMockProfile = useGeologyStore((s) => s.generateMockProfile);
 
   useEffect(() => {
     setIsLoading(true);
@@ -47,6 +50,13 @@ export const MonitorPage: React.FC = () => {
 
     return () => clearInterval(loadInterval);
   }, [setTunnelRings, setIsLoading, setLoadingProgress]);
+
+  useEffect(() => {
+    const initTimer = setTimeout(() => {
+      generateMockProfile(0, 0, 0, { x: 0, y: 0, z: 0, w: 1 });
+    }, 1500);
+    return () => clearTimeout(initTimer);
+  }, [generateMockProfile]);
 
   const handlePoseMessage = useCallback((pose: TbmPoseData) => {
     updatePose(pose);
@@ -128,6 +138,7 @@ export const MonitorPage: React.FC = () => {
       <StatusBar />
       <PosePanel />
       <ProgressPanel />
+      <GeologyToolbar />
       <ControlBar
         onToggleFullscreen={toggleFullscreen}
         isFullscreen={isFullscreen}
